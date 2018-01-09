@@ -1,6 +1,12 @@
 package wait
 
-import "time"
+import (
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+)
 
 type ConditionFunc func() (done bool, err error)
 type WaitFunc func(done <-chan struct{}) <-chan struct{}
@@ -20,6 +26,37 @@ func WaitFor(wait WaitFunc, fn ConditionFunc, done <-chan struct{}) error {
 			break
 		}
 	}
+	return nil
+}
+
+func WaitForFinish(wait WaitFunc, fn ConditionFunc, done <-chan struct{}) error {
+	var finishUp = make(chan struct{}, 1)
+	var gracefulStop = make(chan os.Signal, 1)
+	signal.Notify(gracefulStop, os.Kill, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		sig := <-gracefulStop
+		log.Printf("Caught sig: %+v", sig)
+		finishUp <- struct{}{}
+	}()
+
+	ch := wait(done)
+
+Loop:
+	for {
+		select {
+		case <-finishUp:
+			return nil
+		case _, open := <-ch:
+			if _, err := fn(); err != nil {
+				return err
+			}
+			if !open {
+				break Loop
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -103,4 +140,13 @@ func PollImmediateInfinite(interval time.Duration, condition ConditionFunc) erro
 
 func PollUntil(interval time.Duration, condition ConditionFunc, stopCh <-chan struct{}) error {
 	return WaitFor(poller(interval, 0), condition, stopCh)
+}
+
+func PollUntilFinish(interval time.Duration, condition ConditionFunc) error {
+	if _, err := condition(); err != nil {
+		return err
+	}
+	done := make(chan struct{})
+	defer close(done)
+	return WaitForFinish(poller(interval, 0), condition, done)
 }
